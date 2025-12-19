@@ -1,0 +1,72 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger: 
+  - main
+
+  
+
+pool:  mypool
+
+jobs:
+  - job: linting
+    displayName: lint kar rahe hai
+    steps:
+
+    - task: Bash@3
+      displayName: biome linting
+      inputs:
+        targetType: 'inline'
+        script: |
+          sudo curl -L -O "https://github.com/biomejs/biome/releases/download/@biomejs%2Fbiome%402.3.8/biome-linux-x64"
+          
+          sudo chmod +x biome-linux-x64
+          
+          sudo mv biome-linux-x64 /usr/local/bin/biome   # optionally move to PATH
+          
+          biome lint "$(System.DefaultWorkingDirectory)/src" || true
+      
+
+    - task: NodeTool@0
+      displayName: node install kar rahe hai
+      inputs:
+        versionSource: 'spec'
+        versionSpec: '16.x'
+        checkLatest: true
+    - task: Bash@3
+      displayName: stylelint kar rahe
+      inputs:
+        targetType: 'inline'
+        script: |
+          npm install -g stylelint
+          npm install -g stylelint-config-standard        
+          stylelint $(System.DefaultWorkingDirectory)/src --config stylelint.config.mjs  || true
+    - task: Bash@3
+      displayName: running yaml
+      inputs:
+        targetType: 'inline'
+        script: |
+          sudo apt-get update -y
+          sudo apt-get install -y python3 python3-venv
+          
+                # Create virtual environment
+          python3 -m venv venv
+          
+                # Activate venv
+          source venv/bin/activate
+          
+                # Install yamllint inside venv (allowed!)
+          pip install yamllint
+          
+          echo "Running yamllint..." 
+          venv/bin/yamllint $(System.DefaultWorkingDirectory) || true
+    - task: Bash@3
+      displayName: markdown lint
+      inputs:
+        targetType: 'inline'
+        script: |
+          npm install -g markdownlint-cli      
+          markdownlint "**/*.md" || echo "Markdown lint warnings/errors found (pipeline not failing)"
+
