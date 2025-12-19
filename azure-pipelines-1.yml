@@ -1,72 +1,168 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
+trigger:
+- main
 
-trigger: 
-  - main
+variables:
+  terraformVersion: '1.6.6'
+  devDir: 'Environments/Dev'
+  prodDir: 'Environments/Prod'
+  infracostApiKey: $(INFRACOST_API_KEY)
 
-  
+stages:
 
-pool:  mypool
-
-jobs:
-  - job: linting
-    displayName: lint kar rahe hai
+##################################################
+# STAGE 1: SAST + CODE QUALITY
+##################################################
+- stage: SAST_Code_Quality
+  displayName: "SAST & Code Quality"
+  jobs:
+  - job: sast
+    pool:
+      vmImage: ubuntu-latest
     steps:
+    - checkout: self
 
-    - task: Bash@3
-      displayName: biome linting
+    # SonarQube
+    - task: SonarQubePrepare@5
       inputs:
-        targetType: 'inline'
-        script: |
-          sudo curl -L -O "https://github.com/biomejs/biome/releases/download/@biomejs%2Fbiome%402.3.8/biome-linux-x64"
-          
-          sudo chmod +x biome-linux-x64
-          
-          sudo mv biome-linux-x64 /usr/local/bin/biome   # optionally move to PATH
-          
-          biome lint "$(System.DefaultWorkingDirectory)/src" || true
-      
+        SonarQube: 'SonarQube-Service-Connection'
+        scannerMode: 'CLI'
+        configMode: 'manual'
+        cliProjectKey: 'terraform-micro-infra'
+        cliSources: '.'
 
-    - task: NodeTool@0
-      displayName: node install kar rahe hai
+    - task: SonarQubeAnalyze@5
+    - task: SonarQubePublish@5
       inputs:
-        versionSource: 'spec'
-        versionSpec: '16.x'
-        checkLatest: true
-    - task: Bash@3
-      displayName: stylelint kar rahe
-      inputs:
-        targetType: 'inline'
-        script: |
-          npm install -g stylelint
-          npm install -g stylelint-config-standard        
-          stylelint $(System.DefaultWorkingDirectory)/src --config stylelint.config.mjs  || true
-    - task: Bash@3
-      displayName: running yaml
-      inputs:
-        targetType: 'inline'
-        script: |
-          sudo apt-get update -y
-          sudo apt-get install -y python3 python3-venv
-          
-                # Create virtual environment
-          python3 -m venv venv
-          
-                # Activate venv
-          source venv/bin/activate
-          
-                # Install yamllint inside venv (allowed!)
-          pip install yamllint
-          
-          echo "Running yamllint..." 
-          venv/bin/yamllint $(System.DefaultWorkingDirectory) || true
-    - task: Bash@3
-      displayName: markdown lint
-      inputs:
-        targetType: 'inline'
-        script: |
-          npm install -g markdownlint-cli      
-          markdownlint "**/*.md" || echo "Markdown lint warnings/errors found (pipeline not failing)"
+        pollingTimeoutSec: '300'
 
+    # tfsec
+    - script: |
+        curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+        tfsec .
+      displayName: "tfsec Scan"
+
+    # checkov
+    - script: |
+        pip install checkov
+        checkov -d .
+      displayName: "Checkov Scan"
+
+##################################################
+# STAGE 2: TERRAFORM VALIDATE + PLAN + COST
+##################################################
+- stage: Terraform_Validate_Plan
+  displayName: "Terraform Validate, Plan & Infracost"
+  dependsOn: SAST_Code_Quality
+  jobs:
+  - job: terraform
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+
+    # Terraform Init (Assistant)
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Init (DEV)"
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        workingDirectory: $(devDir)
+        backendServiceArm: 'AzureRM-Service-Connection'
+        backendAzureRmResourceGroupName: 'tfstate-rg'
+        backendAzureRmStorageAccountName: 'tfstateaccount'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: 'dev.tfstate'
+
+    # Terraform Validate
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Validate (DEV)"
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: $(devDir)
+
+    # Terraform Plan
+    - task: TerraformTaskV4@4
+      displayName: "Terraform Plan (DEV)"
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: $(devDir)
+        environmentServiceNameAzureRM: 'AzureRM-Service-Connection'
+        commandOptions: '-out=tfplan'
+
+    # Infracost
+    - script: |
+        curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+        infracost breakdown \
+          --path $(devDir) \
+          --format table
+      env:
+        INFRACOST_API_KEY: $(infracostApiKey)
+      displayName: "Infracost Cost Estimation"
+
+##################################################
+# STAGE 3: TERRATEST
+##################################################
+- stage: Terratest
+  displayName: "Terratest Infra Testing"
+  dependsOn: Terraform_Validate_Plan
+  jobs:
+  - job: terratest
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+
+    - script: |
+        sudo apt update
+        sudo apt install -y golang-go
+      displayName: "Install Go"
+
+    - script: |
+        cd tests/terratest
+        go mod init terratest || true
+        go mod tidy
+        go test -v -timeout 30m
+      displayName: "Run Terratest"
+
+##################################################
+# STAGE 4: PROD APPLY (MANUAL APPROVAL)
+##################################################
+- stage: Prod_Deploy
+  displayName: "Terraform Apply PROD"
+  dependsOn: Terratest
+  condition: succeeded()
+
+  jobs:
+  - deployment: prod_apply
+    displayName: "Apply PROD Infra"
+    environment: prod   # 🔒 Manual approval yahin se aayega
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          # Terraform Init PROD
+          - task: TerraformTaskV4@4
+            displayName: "Terraform Init (PROD)"
+            inputs:
+              provider: 'azurerm'
+              command: 'init'
+              workingDirectory: $(prodDir)
+              backendServiceArm: 'AzureRM-Service-Connection'
+              backendAzureRmResourceGroupName: 'tfstate-rg'
+              backendAzureRmStorageAccountName: 'tfstateaccount'
+              backendAzureRmContainerName: 'tfstate'
+              backendAzureRmKey: 'prod.tfstate'
+
+          # Terraform Apply PROD
+          - task: TerraformTaskV4@4
+            displayName: "Terraform Apply (PROD)"
+            inputs:
+              provider: 'azurerm'
+              command: 'apply'
+              workingDirectory: $(prodDir)
+              environmentServiceNameAzureRM: 'AzureRM-Service-Connection'
+              commandOptions: '-auto-approve'
