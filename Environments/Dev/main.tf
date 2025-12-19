@@ -55,10 +55,12 @@ module "k8s_cluster" {
   node_pool_name      = "agentpool"
   node_count          = 2
   vm_size             = "Standard_A2_v2"
+  depends_on = [ module.rg ]
 
 }
 
 module "acr" {
+  depends_on = [ module.rg ]
   source   = "../../Modules/azurerm_container_registry"
   acr_name = "devcontainerregistry8210"
   location = "East US"
@@ -73,3 +75,4 @@ module "acr" {
 #   resource_group_name = "dev-resource-group"
 #   identity_name       = "dev-managed-identity"
 # }
+

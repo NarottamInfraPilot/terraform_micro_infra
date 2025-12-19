@@ -25,16 +25,18 @@ module "pip" {
 }
 
 module "sql_server_name" {
-  source                       = "../../Modules/azurerm_sql_server"
-  sql_server_name              = "prodsqlserver8210"
-  resource_group_name          = module.rg.rg_name
-  location                     = module.rg.location
-  version                      = "12.0"
+  source              = "../../Modules/azurerm_sql_server"
+  sql_server_name     = "prodsqlserver8210"
+  resource_group_name = module.rg.rg_name
+  location            = module.rg.location
+  # version                      = "12.0"
   administrator_login          = "sqladmin"
-  administrator_login_password = "P@ssw0rd1234" # Note: In production, use Azure Key Vault for passwords
+  administrator_login_password = "P@ssw0rd1234"
+  # Note: In production, use Azure Key Vault for passwords
 }
 
 module "sql_db" {
+  sql_server_id = module.sql_server_name.id
   source        = "../../Modules/azurerm_sql_db"
   database_name = "prodsqldb8210"
   collation     = "SQL_Latin1_General_CP1_CI_AS"
@@ -42,6 +44,8 @@ module "sql_db" {
   max_size_gb   = 100  # Increased for production workload
   sku_name      = "P1" # Changed to Premium tier for production
   enclave_type  = "None"
+
+
 }
 
 module "k8s_cluster" {
